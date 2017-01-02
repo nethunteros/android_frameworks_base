@@ -402,6 +402,11 @@ public class NetworkAgentInfo implements Comparable<NetworkAgentInfo> {
         return networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN);
     }
 
+    // Nethunter: Check if this is an ethernet connection
+    public boolean isETHERNET() {
+        return networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET);
+    }
+
     private int getCurrentScore(boolean pretendValidated) {
         // TODO: We may want to refactor this into a NetworkScore class that takes a base score from
         // the NetworkAgent and signals from the NetworkAgent and uses those signals to modify the
