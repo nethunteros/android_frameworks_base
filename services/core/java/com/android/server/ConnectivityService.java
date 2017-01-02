@@ -4929,6 +4929,7 @@ public class ConnectivityService extends IConnectivityManager.Stub
             ReapUnvalidatedNetworks reapUnvalidatedNetworks, long now) {
         if (!newNetwork.everConnected) return;
         boolean keep = newNetwork.isVPN();
+        boolean keep_ethernet = newNetwork.isETHERNET();
         boolean isNewDefault = false;
         NetworkAgentInfo oldDefaultNetwork = null;
 
@@ -4963,76 +4964,82 @@ public class ConnectivityService extends IConnectivityManager.Stub
 
             // check if it satisfies the NetworkCapabilities
             if (VDBG) log("  checking if request is satisfied: " + nri.request);
-            if (satisfies) {
-                // next check if it's better than any current network we're using for
-                // this request
-                if (VDBG) {
-                    log("currentScore = " +
-                            (currentNetwork != null ? currentNetwork.getCurrentScore() : 0) +
-                            ", newScore = " + score);
-                }
-                if (currentNetwork == null || currentNetwork.getCurrentScore() < score) {
-                    if (VDBG) log("rematch for " + newNetwork.name());
-                    if (currentNetwork != null) {
-                        if (VDBG) log("   accepting network in place of " + currentNetwork.name());
-                        currentNetwork.removeRequest(nri.request.requestId);
-                        currentNetwork.lingerRequest(nri.request, now, mLingerDelayMs);
-                        affectedNetworks.add(currentNetwork);
-                    } else {
-                        if (VDBG) log("   accepting network in place of null");
+            // Nethunter: If this is not an eterhnet connection then pick best network
+            // otherwise we want to keep ethernet active while wifi is active
+            if (!keep_ethernet) {
+                log("[NH] Ethernet should not get past here");
+                if (satisfies) {
+                    // next check if it's better than any current network we're using for
+                    // this request
+                    if (VDBG) {
+                        log("currentScore = " +
+                                (currentNetwork != null ? currentNetwork.getCurrentScore() : 0) +
+                                ", newScore = " + score);
                     }
-                    newNetwork.unlingerRequest(nri.request);
-                    mNetworkForRequestId.put(nri.request.requestId, newNetwork);
-                    if (!newNetwork.addRequest(nri.request)) {
-                        Slog.wtf(TAG, "BUG: " + newNetwork.name() + " already has " + nri.request);
-                    }
-                    addedRequests.add(nri);
-                    keep = true;
-                    // Tell NetworkFactories about the new score, so they can stop
-                    // trying to connect if they know they cannot match it.
-                    // TODO - this could get expensive if we have alot of requests for this
-                    // network.  Think about if there is a way to reduce this.  Push
-                    // netid->request mapping to each factory?
-                    sendUpdatedScoreToFactories(nri.request, score);
-                    if (isDefaultRequest(nri)) {
-                        isNewDefault = true;
-                        oldDefaultNetwork = currentNetwork;
+                    if (currentNetwork == null || currentNetwork.getCurrentScore() < score) {
+                        if (VDBG) log("rematch for " + newNetwork.name());
                         if (currentNetwork != null) {
-                            mLingerMonitor.noteLingerDefaultNetwork(currentNetwork, newNetwork);
+                            if (VDBG) log("   accepting network in place of " + currentNetwork.name());
+                            currentNetwork.removeRequest(nri.request.requestId);
+                            currentNetwork.lingerRequest(nri.request, now, mLingerDelayMs);
+                            affectedNetworks.add(currentNetwork);
+                        } else {
+                            if (VDBG) log("   accepting network in place of null");
+                        }
+                        newNetwork.unlingerRequest(nri.request);
+                        mNetworkForRequestId.put(nri.request.requestId, newNetwork);
+                        if (!newNetwork.addRequest(nri.request)) {
+                            Slog.wtf(TAG, "BUG: " + newNetwork.name() + " already has " + nri.request);
+                        }
+                        addedRequests.add(nri);
+                        keep = true;
+                        // Tell NetworkFactories about the new score, so they can stop
+                        // trying to connect if they know they cannot match it.
+                        // TODO - this could get expensive if we have alot of requests for this
+                        // network.  Think about if there is a way to reduce this.  Push
+                        // netid->request mapping to each factory?
+                        sendUpdatedScoreToFactories(nri.request, score);
+                        if (isDefaultRequest(nri)) {
+                            isNewDefault = true;
+                            oldDefaultNetwork = currentNetwork;
+                            if (currentNetwork != null) {
+                                mLingerMonitor.noteLingerDefaultNetwork(currentNetwork, newNetwork);
+                            }
                         }
                     }
+                } else if (newNetwork.isSatisfyingRequest(nri.request.requestId)) {
+                    // If "newNetwork" is listed as satisfying "nri" but no longer satisfies "nri",
+                    // mark it as no longer satisfying "nri".  Because networks are processed by
+                    // rematchAllNetworksAndRequests() in descending score order, "currentNetwork" will
+                    // match "newNetwork" before this loop will encounter a "currentNetwork" with higher
+                    // score than "newNetwork" and where "currentNetwork" no longer satisfies "nri".
+                    // This means this code doesn't have to handle the case where "currentNetwork" no
+                    // longer satisfies "nri" when "currentNetwork" does not equal "newNetwork".
+                    if (DBG) {
+                        log("Network " + newNetwork.name() + " stopped satisfying" +
+                                " request " + nri.request.requestId);
+                    }
+                    newNetwork.removeRequest(nri.request.requestId);
+                    if (currentNetwork == newNetwork) {
+                        mNetworkForRequestId.remove(nri.request.requestId);
+                        sendUpdatedScoreToFactories(nri.request, 0);
+                    } else {
+                        Slog.wtf(TAG, "BUG: Removing request " + nri.request.requestId + " from " +
+                                newNetwork.name() +
+                                " without updating mNetworkForRequestId or factories!");
+                    }
+                    // TODO: Technically, sending CALLBACK_LOST here is
+                    // incorrect if there is a replacement network currently
+                    // connected that can satisfy nri, which is a request
+                    // (not a listen). However, the only capability that can both
+                    // a) be requested and b) change is NET_CAPABILITY_TRUSTED,
+                    // so this code is only incorrect for a network that loses
+                    // the TRUSTED capability, which is a rare case.
+                    callCallbackForRequest(nri, newNetwork, ConnectivityManager.CALLBACK_LOST, 0);
+                    }
                 }
-            } else if (newNetwork.isSatisfyingRequest(nri.request.requestId)) {
-                // If "newNetwork" is listed as satisfying "nri" but no longer satisfies "nri",
-                // mark it as no longer satisfying "nri".  Because networks are processed by
-                // rematchAllNetworksAndRequests() in descending score order, "currentNetwork" will
-                // match "newNetwork" before this loop will encounter a "currentNetwork" with higher
-                // score than "newNetwork" and where "currentNetwork" no longer satisfies "nri".
-                // This means this code doesn't have to handle the case where "currentNetwork" no
-                // longer satisfies "nri" when "currentNetwork" does not equal "newNetwork".
-                if (DBG) {
-                    log("Network " + newNetwork.name() + " stopped satisfying" +
-                            " request " + nri.request.requestId);
-                }
-                newNetwork.removeRequest(nri.request.requestId);
-                if (currentNetwork == newNetwork) {
-                    mNetworkForRequestId.remove(nri.request.requestId);
-                    sendUpdatedScoreToFactories(nri.request, 0);
-                } else {
-                    Slog.wtf(TAG, "BUG: Removing request " + nri.request.requestId + " from " +
-                            newNetwork.name() +
-                            " without updating mNetworkForRequestId or factories!");
-                }
-                // TODO: Technically, sending CALLBACK_LOST here is
-                // incorrect if there is a replacement network currently
-                // connected that can satisfy nri, which is a request
-                // (not a listen). However, the only capability that can both
-                // a) be requested and b) change is NET_CAPABILITY_TRUSTED,
-                // so this code is only incorrect for a network that loses
-                // the TRUSTED capability, which is a rare case.
-                callCallbackForRequest(nri, newNetwork, ConnectivityManager.CALLBACK_LOST, 0);
             }
-        }
+
         if (isNewDefault) {
             // Notify system services that this network is up.
             makeDefault(newNetwork);
